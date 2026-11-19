@@ -56,10 +56,6 @@ Before reporting any change as done: `gofmt -l .`, `go vet ./...` and `go test -
 - `-log-level debug` logs request and response bodies, which contain user source code. Do not enable it on shared storage or paste such logs anywhere.
 - Do not weaken the access guard (`internal/proxy/guard.go`) without an explicit task for it.
 
-## Git
-
-Do not commit, push, or create branches unless the user asks. The tree currently has uncommitted work; do not discard or reset it.
-
 ## Working as a team (Herdr)
 
 When agents are started through Herdr, each takes one role. The role file is `.roles/<agent-name>.md`; **read yours completely before acting**.
