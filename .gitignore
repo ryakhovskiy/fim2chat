@@ -28,10 +28,9 @@ go.work.sum
 
 # env file
 .env
-/certs/*
-!/certs/.gitkeep
 
 # Editor/IDE
 # .idea/
 # .vscode/
 fim2chat
+*.pem
