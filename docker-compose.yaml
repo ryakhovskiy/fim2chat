@@ -1,0 +1,15 @@
+services:
+  fim2chat:
+    build: .
+    # Secrets come from the git-ignored .env at run time; nothing is baked in.
+    env_file: .env
+    volumes:
+      # Certificates are mounted at run time, never copied into the image.
+      - ./certs:/certs:ro
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8787:8787"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true

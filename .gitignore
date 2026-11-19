@@ -1,17 +1,13 @@
-# If you prefer the allow list template instead of the deny list, see community template:
-# https://github.com/github/gitignore/blob/main/community/Golang/Go.AllowList.gitignore
-#
-# Binaries for programs and plugins
+# Binaries
 *.exe
 *.exe~
 *.dll
 *.so
 *.dylib
+/fim2chat
 
-# Test binary, built with `go test -c`
+# Test / coverage artifacts
 *.test
-
-# Code coverage profiles and other test artifacts
 *.out
 coverage.html
 coverage.txt
@@ -19,18 +15,28 @@ coverage.xml
 *.coverprofile
 profile.cov
 
-# Dependency directories (remove the comment below to include it)
-# vendor/
-
-# Go workspace file
+# Go workspace
 go.work
 go.work.sum
 
-# env file
+# ---- Secrets: never commit ----
+# Env files (keys live here). Only the template is tracked.
 .env
+.env.*
+!.env.example
+*.env
+# Certificates and keys - mounted at `docker run`, never committed
+*.pem
+*.crt
+*.cer
+*.der
+*.key
+*.p12
+*.pfx
+*.jks
+certs/*
+!certs/.gitkeep
 
 # Editor/IDE
-# .idea/
-# .vscode/
-fim2chat
-*.pem
+.idea/
+.vscode/

@@ -1,0 +1,18 @@
+# Allow-list: only what the build needs enters the build context.
+*
+!go.mod
+!go.sum
+!cmd/
+!internal/
+
+# Belt and braces: even inside allowed dirs, never ship secrets or tests.
+**/*.pem
+**/*.crt
+**/*.cer
+**/*.key
+**/*.p12
+**/*.pfx
+**/.env
+**/.env.*
+**/*.env
+**/*_test.go
