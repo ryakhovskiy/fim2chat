@@ -40,3 +40,4 @@ certs/*
 # Editor/IDE
 .idea/
 .vscode/
+PROGRESS.md

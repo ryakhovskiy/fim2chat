@@ -3,8 +3,6 @@ package proxy
 import (
 	"encoding/json"
 	"errors"
-
-	"ryakhovskiy/fim2chat/internal/fim"
 )
 
 type completionRequest struct {
@@ -46,7 +44,7 @@ func stringList(raw json.RawMessage) []string {
 	return nil
 }
 
-func (p *handler) chatBody(model string, parts fim.Prompt, maxTokens int, stops []string) ([]byte, error) {
+func (p *handler) chatBody(model, systemMessage, userMessage string, maxTokens int, stops []string) ([]byte, error) {
 	if maxTokens <= 0 {
 		maxTokens = p.cfg.DefaultMaxTokens
 	}
@@ -54,8 +52,8 @@ func (p *handler) chatBody(model string, parts fim.Prompt, maxTokens int, stops 
 	chat := map[string]any{
 		"model": model,
 		"messages": []map[string]string{
-			{"role": "system", "content": p.cfg.SystemPrompt},
-			{"role": "user", "content": parts.UserMessage()},
+			{"role": "system", "content": systemMessage},
+			{"role": "user", "content": userMessage},
 		},
 		"stream":             false,
 		p.cfg.MaxTokensField: maxTokens,

@@ -2,7 +2,7 @@
 
 A small proxy that lets [Zed](https://zed.dev)'s OpenAI-compatible **edit predictions** work with an endpoint that only offers `/v1/chat/completions`, such as a corporate OpenAI gateway (Portkey, Azure OpenAI).
 
-Zed sends legacy fill-in-the-middle (FIM) requests to `/v1/completions`, which chat-only gateways don't serve. fim2chat accepts those requests, turns them into chat requests, and converts the answer back.
+Zed sends legacy completion requests to `/v1/completions`, which chat-only gateways don't serve. fim2chat accepts both fill-in-the-middle (FIM) insertion prompts and edit-rewrite prompts, turns them into chat requests, and converts the answer back.
 
 ```
 Zed -> fim2chat POST /v1/completions -> corporate gateway POST /v1/chat/completions -> OpenAI
@@ -64,7 +64,35 @@ In Zed's `settings.json`:
 }
 ```
 
-Supported `prompt_format` values: `qwen`, `codegemma`, `star_coder`, `deepseek_coder`, `code_llama`, `codestral`, `glm`. Don't use `zeta`, `zeta2` or `sweep`: they are edit-rewrite formats, not prefix/suffix formats.
+Supported FIM `prompt_format` values: `qwen`, `codegemma`, `star_coder`, `deepseek_coder`, `code_llama`, `codestral`, `glm`. The edit formats `zeta` and `zeta2` rewrite an editable region; `sweep` rewrites the whole window around the cursor.
+
+### Edit formats
+
+Keep the provider, `api_url` and `model` from the settings above. Set these fields inside `edit_predictions.open_ai_compatible_api` for the format you want:
+
+`zeta`:
+
+```json
+{"prompt_format": "zeta", "max_output_tokens": 256}
+```
+
+`zeta2`:
+
+```json
+{"prompt_format": "zeta2", "max_output_tokens": 256}
+```
+
+`sweep`:
+
+```json
+{"prompt_format": "sweep", "max_output_tokens": 1024}
+```
+
+fim2chat detects the format from the prompt; no fim2chat setting is needed. `zeta2_1` and other marker-based Seed-Coder variants are unsupported and return HTTP 400.
+
+Raise `max_output_tokens` enough to fit the full replacement. Zed multiplies this setting by four for `zeta` and `zeta2`, but not for `sweep`; a sweep window of about 21 lines needs roughly 1024 tokens, depending on the code. A general chat model rewrites the region or window on each keystroke, which is slower and heavier than FIM. Use the fastest model available with reasoning off.
+
+Edit formats use their own built-in rewrite instructions; `-system-prompt-file` applies only to FIM. Cleanup removes wrappers and cursor markers and preserves the region's trailing line endings. Empty, whitespace-only or truncated (`finish_reason=length`) answers produce a safe no-change reply: the original region for `zeta`, or an empty prediction for `zeta2` and `sweep`. `-raw` disables cleanup and sends the model text unchanged, but the no-change safety net for truncated or empty/whitespace-only answers still applies.
 
 ## Configuration
 
@@ -92,8 +120,8 @@ Every setting is a command-line flag and an environment variable (also settable 
 | `-temperature` | `FIM_TEMPERATURE` | `0` | Negative omits the field (needed by some reasoning models) |
 | `-extra-body` | `FIM_EXTRA_BODY` | | JSON merged into the upstream body last, overriding other fields, e.g. `{"reasoning_effort":"none"}` |
 | `-send-stop` | `FIM_SEND_STOP` | `false` | Also send Zed's stop sequences upstream (at most 4). They are always applied locally |
-| `-system-prompt-file` | `FIM_SYSTEM_PROMPT_FILE` | | Replace the built-in system prompt |
-| `-raw` | `FIM_RAW` | `false` | Turn off output clean-up |
+| `-system-prompt-file` | `FIM_SYSTEM_PROMPT_FILE` | | Replace the built-in FIM system prompt; edit formats keep their rewrite instructions |
+| `-raw` | `FIM_RAW` | `false` | Turn off output clean-up; edit replies still use the no-change safety net for truncated or blank answers |
 
 **Server and safety**
 
@@ -121,13 +149,13 @@ If predictions come back empty with `finish_reason=length`, reasoning used up th
 
 ## How it works
 
-1. **Parse.** Zed formats the prompt for its `prompt_format`, e.g. `<|fim_prefix|>…<|fim_suffix|>…<|fim_middle|>`. fim2chat detects the markers and splits the prompt into context, prefix (code before the cursor) and suffix (code after it).
-2. **Ask.** It sends the chat model the file with a `<CURSOR>` marker and a strict system prompt: reply with only the text to insert.
-3. **Clean.** Chat models are chatty, so the answer is post-processed. fim2chat strips code fences and `<think>` blocks, drops a re-typed copy of the current line, drops text repeated from the suffix (closing brackets, the rest of the line) unless it closes something the answer opened, and applies Zed's stop sequences.
+1. **Parse.** fim2chat first checks for an anchored `zeta`, `zeta2` or `sweep` edit prompt and extracts its context and replacement region or window. Otherwise it parses the FIM markers, e.g. `<|fim_prefix|>…<|fim_suffix|>…<|fim_middle|>`, into context, prefix (code before the cursor) and suffix (code after it).
+2. **Ask.** For FIM, it sends the file with a `<CURSOR>` marker and asks for only the text to insert. For edits, it sends recent edits and context with instructions to return the full rewritten region or window, keeping unchanged lines verbatim. Sweep has no cursor marker; the model predicts the next edit from the difference between the original and current windows.
+3. **Clean.** Both paths strip code fences and `<think>` blocks and apply stop sequences. FIM also drops a re-typed copy of the current line and text repeated from the suffix unless it closes something the answer opened. Rewrite cleanup removes Zed wrappers and cursor markers, then restores the region's trailing line endings; truncated or unusable answers become no-change replies. `-raw` skips cleanup, while keeping the rewrite safety net.
 4. **Reply.** It returns a standard `text_completion`. If Zed asked for `stream: true`, the answer is sent as one SSE chunk, because the upstream call itself is not streamed.
 
 Every request gets a `request_id` that appears on all its log lines (and in the `X-Request-Id` response header), so one completion can be followed from Zed to the upstream and back. Secrets are redacted in logs.
 
 **Layout:** `cmd/fim2chat` (entry point), `internal/config` (flags, env, `.env`), `internal/proxy` (HTTP handler and guard), `internal/fim` (prompt parsing and clean-up), `internal/upstream` (chat client), `internal/logging`, `internal/health` (Docker healthcheck). Run the tests with `go test -race ./...`.
 
-**Limitations:** output quality depends on how well the model follows the "insertion only" instruction, and the clean-up is heuristic. Only the first prompt is used if Zed sends an array.
+**Limitations:** output quality depends on how well the model follows the insertion or rewrite instructions, and cleanup is heuristic. There is no content-based guard against a model that elides code in a nonempty rewrite (for example, replacing lines with a "rest unchanged" comment). Sweep strips one trailing newline that Zed appends to the current window; if the real window already ended in a newline at an empty final line of the file, the replacement loses that one trailing newline. Only the first prompt is used if Zed sends an array.

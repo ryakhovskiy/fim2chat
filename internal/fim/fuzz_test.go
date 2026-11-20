@@ -1,10 +1,118 @@
 package fim
 
 import (
+	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"unicode/utf8"
 )
+
+func FuzzParseEdit(f *testing.F) {
+	for _, prompt := range []string{
+		zedZeta("a.go", "", "before\n", "字", "🎉\r\n", "\nafter", true),
+		zedZeta("a.go", "", "", "literal := `\n\n### User Excerpt:\n\n`", "tail", "", false),
+		zedZeta2("a.go", "<filename>b.go\ncontext\n\n", "", "", "", ""),
+		zedSweep("a.go", "", "original", "current\n"),
+		"<[fim-suffix]>after\n<[fim-prefix]><filename>a\n<|marker_0|>x<[fim-middle]>",
+		zedZetaHeader + "\n\n### Response:\n", "", "plain\xff",
+	} {
+		f.Add(prompt, "世界\r\n", "🎉\n")
+	}
+	f.Fuzz(func(t *testing.T, prompt, left, right string) {
+		e, ok, err := ParseEdit(prompt)
+		again, againOK, againErr := ParseEdit(prompt)
+		if !reflect.DeepEqual(e, again) || ok != againOK || (err == nil) != (againErr == nil) {
+			t.Fatal("ParseEdit is not deterministic")
+		}
+		if err != nil && (!errors.Is(err, ErrUnsupportedEdit) || ok) {
+			t.Fatalf("unexpected result: %v %v", ok, err)
+		}
+		if !ok {
+			if !reflect.DeepEqual(e, Edit{}) {
+				t.Fatalf("non-edit returned nonzero Edit: %+v", e)
+			}
+		} else {
+			if err != nil || (e.Format != EditZeta && e.Format != EditZeta2 && e.Format != EditSweep) {
+				t.Fatalf("bad edit format: %q %v", e.Format, err)
+			}
+			if len(e.Region) > len(prompt) {
+				t.Fatal("parser invented region bytes")
+			}
+			if utf8.ValidString(prompt) && (!utf8.ValidString(e.Region) || !utf8.ValidString(e.UserMessage())) {
+				t.Fatal("parser split UTF-8")
+			}
+		}
+		// Exclude reserved layout tokens from generated code, as Zed itself
+		// does. Arbitrary malformed and marker-heavy prompts are tested above.
+		left = strings.ReplaceAll(left, "<", "‹")
+		right = strings.ReplaceAll(right, "<", "‹")
+		for _, tc := range []struct{ prompt, want string }{
+			{zedZeta("a", "", "", left, right, "", false), left + right},
+			{zedZeta2("a", "", "", left, right, ""), strings.ReplaceAll(zedLine(left+"<|user_cursor|>"+right), "<|user_cursor|>", "")},
+			{zedSweep("a", "", "original", left+right), strings.TrimSuffix(zedLine(left+right), "\n")},
+		} {
+			parsed := requireEdit(t, tc.prompt)
+			if parsed.Region != tc.want {
+				t.Fatalf("parser lost code: got %q want %q", parsed.Region, tc.want)
+			}
+		}
+	})
+}
+
+func FuzzEditClean(f *testing.F) {
+	for _, format := range []uint8{0, 1, 2} {
+		for _, model := range []string{"new", "<think>x</think>```go\n世界🎉\n```", "<|user_<|user_cursor|>cursor|>", "<CUR<CURSOR>SOR>", "<|user_<|user_cursor_is_here|>cursor|>", "new\r\n\r\n", "newSTOPdiscard", "", "\xff\xfe"} {
+			f.Add(format, "old\r\n", model, "STOP")
+		}
+	}
+	f.Add(uint8(0), "own <CURSOR> STOP\n", "<CURSOR>new\n", "\n")
+	f.Add(uint8(2), "old", "new</s>discard", "")
+	f.Fuzz(func(t *testing.T, kind uint8, region, model, stop string) {
+		e := Edit{Format: []EditFormat{EditZeta, EditZeta2, EditSweep}[kind%3], Region: region}
+		out, usable := e.Clean(model, []string{stop})
+		if again, againUsable := e.Clean(model, []string{stop}); again != out || againUsable != usable {
+			t.Fatal("Clean is not deterministic")
+		}
+		if !usable {
+			if out != e.NoChange() {
+				t.Fatalf("unusable reply %q, want NoChange %q", out, e.NoChange())
+			}
+			return
+		}
+		if utf8.ValidString(region) && utf8.ValidString(model) && utf8.ValidString(stop) && !utf8.ValidString(out) {
+			t.Fatalf("split UTF-8: %q -> %q", model, out)
+		}
+		core := strings.TrimRight(out, "\r\n")
+		trail := region[len(strings.TrimRight(region, "\r\n")):]
+		if out[len(core):] != trail {
+			t.Fatalf("trailing run = %q, want %q", out[len(core):], trail)
+		}
+		if len(core) > len(model) {
+			t.Fatalf("invented bytes: %q -> %q", model, out)
+		}
+		stops := []string{stop}
+		switch e.Format {
+		case EditZeta:
+			stops = append(stops, "<|editable_region_end|>")
+		case EditSweep:
+			stops = append(stops, "<|file_sep|>", "</s>")
+		}
+		for _, s := range stops {
+			if s != "" && strings.Contains(core, s) {
+				t.Fatalf("stop %q survived in %q", s, out)
+			}
+		}
+		for _, marker := range []string{"<|user_cursor|>", "<|user_cursor_is_here|>"} {
+			if strings.Contains(out, marker) {
+				t.Fatalf("cursor marker %q leaked in %q", marker, out)
+			}
+		}
+		if !strings.Contains(region, "<CURSOR>") && strings.Contains(out, "<CURSOR>") {
+			t.Fatalf("cursor marker leaked in %q", out)
+		}
+	})
+}
 
 // Seeds also run as ordinary tests; `go test -fuzz=FuzzParse ./internal/fim`
 // explores beyond them.

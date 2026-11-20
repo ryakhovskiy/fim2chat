@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"ryakhovskiy/fim2chat/internal/fim"
@@ -106,8 +107,31 @@ func (p *handler) handleCompletions(w http.ResponseWriter, r *http.Request) {
 		reject(w, logger, http.StatusBadRequest, "invalid prompt", err.Error(), "error", err.Error())
 		return
 	}
+	edit, rewrite, err := fim.ParseEdit(prompt)
+	if errors.Is(err, fim.ErrUnsupportedEdit) {
+		reject(w, logger, http.StatusBadRequest, "unsupported edit prompt", "this prompt_format is not supported by fim2chat (zeta2_1 and other marker formats); set prompt_format to zeta, zeta2, sweep or a FIM format")
+		return
+	}
+	if err != nil {
+		logger.Error("cannot parse edit prompt")
+		writeError(w, http.StatusInternalServerError, "cannot parse edit prompt")
+		return
+	}
 	stops := stringList(req.Stop)
-	parts := fim.Parse(prompt, req.Suffix)
+	var parts fim.Prompt
+	mode, format := "insert", ""
+	systemMessage := p.cfg.SystemPrompt
+	var userMessage string
+	var promptAttrs []any
+	if rewrite {
+		mode, format = "rewrite", string(edit.Format)
+		systemMessage, userMessage = edit.SystemPrompt(), edit.UserMessage()
+		promptAttrs = []any{"context_bytes", edit.ContextBytes(), "region_bytes", len(edit.Region)}
+	} else {
+		parts = fim.Parse(prompt, req.Suffix)
+		format, userMessage = parts.Format, parts.UserMessage()
+		promptAttrs = []any{"context_bytes", len(parts.Context), "prefix_bytes", len(parts.Prefix), "suffix_bytes", len(parts.Suffix)}
+	}
 
 	model := p.cfg.Model
 	modelSource := "config"
@@ -121,13 +145,14 @@ func (p *handler) handleCompletions(w http.ResponseWriter, r *http.Request) {
 		logger.Debug("too many stop sequences for upstream, sending the first 4", "stops", len(upstreamStops))
 		upstreamStops = upstreamStops[:4]
 	}
-	logger.Info("completion requested",
+	requestAttrs := []any{
 		"client_model", req.Model, "model", model, "model_source", modelSource,
 		"client_max_tokens", req.MaxTokens, "stream", req.Stream, "stop_sequences", len(stops),
-		"format", parts.Format, "context_bytes", len(parts.Context),
-		"prefix_bytes", len(parts.Prefix), "suffix_bytes", len(parts.Suffix))
+		"mode", mode, "format", format,
+	}
+	logger.Info("completion requested", append(requestAttrs, promptAttrs...)...)
 
-	chatBody, err := p.chatBody(model, parts, req.MaxTokens, upstreamStops)
+	chatBody, err := p.chatBody(model, systemMessage, userMessage, req.MaxTokens, upstreamStops)
 	if err != nil {
 		logger.Error("cannot build upstream request", "error", err.Error())
 		writeError(w, http.StatusInternalServerError, "cannot build upstream request: "+err.Error())
@@ -164,7 +189,21 @@ func (p *handler) handleCompletions(w http.ResponseWriter, r *http.Request) {
 
 	rawText := cr.Text
 	text := rawText
-	if !p.cfg.Raw {
+	if rewrite {
+		usable, reason := true, "unusable"
+		switch {
+		case cr.FinishReason == "length":
+			usable, reason = false, "truncated"
+		case p.cfg.Raw:
+			usable = strings.TrimSpace(rawText) != ""
+		default:
+			text, usable = edit.Clean(rawText, stops)
+		}
+		if !usable {
+			text = edit.NoChange()
+			logger.Warn("edit reply replaced by no-change reply", "reason", reason)
+		}
+	} else if !p.cfg.Raw {
 		text = parts.Clean(rawText, stops)
 	}
 	finish := cr.FinishReason
@@ -174,9 +213,12 @@ func (p *handler) handleCompletions(w http.ResponseWriter, r *http.Request) {
 
 	logger.Debug("model output cleaned", "raw", rawText, "cleaned", text, "raw_cleanup_disabled", p.cfg.Raw)
 	attrs := []any{
-		"format", parts.Format, "finish_reason", finish,
+		"mode", mode, "format", format, "finish_reason", finish,
 		"raw_bytes", len(rawText), "completion_bytes", len(text),
 		"duration", time.Since(start).Round(time.Millisecond),
+	}
+	if rewrite {
+		attrs = append(attrs, promptAttrs...)
 	}
 	if len(cr.Usage) > 0 && string(cr.Usage) != "null" {
 		attrs = append(attrs, "usage", string(cr.Usage))
